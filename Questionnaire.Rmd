@@ -1,6 +1,6 @@
 ---
 title: "Depression & Cognitive Impairment"
-author: "He Feng"
+author: "Barleiris"
 date: "March 12, 2019"
 output: word_document
 ---
@@ -8,7 +8,7 @@ output: word_document
 ## Load data
 ```{r}
 setwd('...')
-data1 <- read.csv('data1.csv', sep = ',',  header = TRUE)
+data1 <- read.csv('....csv', sep = ',',  header = TRUE)
 
 library(VIM)
 library(Hmisc)
