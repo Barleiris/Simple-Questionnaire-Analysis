@@ -1,0 +1,163 @@
+---
+title: "Depression & Cognitive Impairment"
+author: "He Feng"
+date: "March 12, 2019"
+output: word_document
+---
+
+## Load data
+```{r}
+setwd('...')
+data1 <- read.csv('data1.csv', sep = ',',  header = TRUE)
+
+library(VIM)
+library(Hmisc)
+library(dataMaid)
+library(ggplot2)
+library(reshape2)
+library(tableone)
+library(Matching)
+library(ipw)
+library(survey)
+library(MatchIt)
+library(CCA)
+library(vegan)
+```
+
+## Data processing
+The data contains no extreme values. 9 variables out of 41 have 1 or 2 missing values, which don't have correlations with each other, hence we assume the missingness is MAR. Therefore median imputations could be used for the NAs, or we simply delete the observations with NAs.
+Most of the variables are positively correlated with the correlation coefficient close to zero. In the heatmap, negative correlations are blue, positive ones are red. 
+```{r}
+# descriptive analysis
+summary(data1)
+aggr(data1, prop = FALSE, numbers = TRUE)
+matrixplot(data1)
+visualize(data1, vnam = TRUE)
+
+# missing data imputation
+for(i in 1:length(data1)){
+  data1[,i] <- impute(data1[,i], median)
+  data1[,i] <- as.numeric(data1[,i])
+}
+matrixplot(data1)
+
+# correlation
+corr <- round(cor(data1, method = 'spearman'),2)
+hist(corr, breaks = 100)
+
+heatMap <- function(data, color_limit, color_name){
+  corr <- melt(data)
+ggplot(corr, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = color_limit, space = "Lab", name = color_name) +
+  theme_minimal() + 
+  theme(axis.text.x = element_blank()) +
+  coord_fixed()
+}
+
+heatMap(corr, color_limit = c(-1,1), color_name = "Spearman\nCorrelation")
+
+# classify questions
+confounding <- data1[,c(1,7,8,9,11,20,28,31)]
+depression <- data1[,c(2,3,4,5,6,15,16,17,18,19,21,22,23,29,30,32,33,34,35,36,37,39,41,42)]
+cognitive <- data1[,c(10,12,13,14,24,25,26,27,38,40)]
+```
+
+## Inscidence of cooccurence
+kmeans has a drawback that we cannot explain why a subject is classified into one group instead of another. 
+Pca has a problem that no principle component can be extracted. 
+Hence maybe we will use anormally detection to find the subjects with a risk of getting depression or cognitive impairment, and then calculate the possibility of cooccurence conditioned on two cases respectively. It seems the occurence of depression and cognitive impairment is more common in the cognitive impaired group than in the depressed group.
+```{r}
+fit <- kmeans(depression, 5)
+fit
+
+pca <- princomp(depression, cor = TRUE)
+summary(pca, loading = TRUE)
+screeplot(pca, type = 'lines')
+
+findAtRisk <- function(data, quantil){
+  for (i in 1:length(data)) {
+    data[,i] <- ifelse(data[,i] == max(data[,i]),1,0)
+    }
+  risk_score <- rowMeans(data)
+  at_risk <- which(risk_score > quantile(risk_score, quantil))
+  return(at_risk)
+}
+
+coOccurence <- function(data1, data2, quantil){
+  #the possibility of data2 conditioned on data1
+  breaks <- length(quantil)
+  cooccur_matrix <- matrix(data = NA, nrow = breaks, ncol = breaks)
+  for(i in 1:breaks){
+    for(j in 1:breaks){
+      array1 <- findAtRisk(data1, quantil[i])
+      array2 <- findAtRisk(data2, quantil[j])
+      cooccur_inscidence <- intersect(array1, array2)
+      cooccur_matrix[i,j] <- length(cooccur_inscidence)/length(array1)
+    }
+  }
+  row.names(cooccur_matrix) <- as.character(quantil)
+  colnames(cooccur_matrix) <- as.character(quantil)
+  return(cooccur_matrix)
+}
+
+quantil <- seq(0.5, 0.99, 0.02)
+dep2cog <- coOccurence(depression, cognitive, quantil)
+cog2dep <- coOccurence(cognitive, depression, quantil)
+
+par(mfrow = c(1,2))
+heatMap(dep2cog, color_limit = c(0,1), color_name = "P(cognitive_impairment | depression)")
+heatMap(cog2dep, color_limit = c(0,1), color_name = "P(depression | cognitive_impairment)")
+```
+## Redundancy Analysis
+```{r}
+decorana(cognitive)
+sp0 <- rda(cognitive ~., depression)
+sp0
+plot(sp0,)
+```
+
+## Causal Inference
+Next we use IPSW to compare the score of cognitive impairment in people who feel depressed and who don't.
+The 95% confidence interval of depression's effect on cognition does not contain 0, which means the relationship between depression and cognitive impairment is statistically significant. However, cognition does not have a significant correlation to depression after adjusting for confoundings.
+```{r}
+causalEffect <- function(treat_data, confounding, outcome_data, quantil){
+  
+  print(paste('Effect of', deparse(substitute(treat_data)), 'on', deparse(substitute(outcome_data))))
+  
+  treated <- findAtRisk(treat_data, quantil)
+  treat <- rep(0, length(data1[,1]))
+  treat[treated] <- 1
+  
+  outcome <- rowMeans(outcome_data)
+  
+  xvars <- colnames(confounding)
+  
+  data3 <- cbind(confounding,treat)
+  
+  # Propensity score matching
+  psmodel <- glm(treat ~ ., family = binomial(link = 'logit'), data = data3)
+  ps <- predict(psmodel, type = 'response')
+  weight <- ifelse(data3$treat == 1, 1/(ps), 1/(1-ps))
+  weighteddata <- svydesign(ids = ~1, data =data3, weights = ~ weight)
+  
+  weightedtable <- svyCreateTableOne(vars = xvars, strata = 'treat', data =weighteddata, test = FALSE)
+  print(weightedtable, smd = TRUE)
+  
+  # 95% C.I. for causal effect
+  weightmodel <- ipwpoint(exposure = treat, family = 'binomial', link = 'logit',
+                            denominator = ~ ., data = data3, trunc = .01)
+  summary(weightmodel$weights.trunc)
+
+  ipwplot(weights = weightmodel$weights.trunc, logscale = FALSE, main = 'weights', xlim = c(0,22))
+  data3$wt <- weightmodel$weights.trunc
+  
+  data3 <- cbind(outcome, data3)
+  msm <- (svyglm(outcome ~ treat, design = svydesign(~1, weights = ~ wt, data = data3)))
+  print(coef(msm))
+  print(confint(msm))
+}
+
+causalEffect(depression, confounding, cognitive, 0.8)
+causalEffect(cognitive, confounding, depression, 0.8)
+```
